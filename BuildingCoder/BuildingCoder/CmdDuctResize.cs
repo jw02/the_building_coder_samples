@@ -8,264 +8,301 @@
 //
 #endregion // Header
 
-#region Namespaces
+#region Usings
 using System;
+using System.IO;
+using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
 using System.Diagnostics;
 using Autodesk.Revit.Attributes;
-using Autodesk.Revit.DB;
-using Autodesk.Revit.DB.Mechanical;
 using Autodesk.Revit.UI;
-#endregion // Namespaces
+using Autodesk.Revit.DB;
+using Autodesk.Revit.Exceptions;
+using Autodesk.Revit.DB.Plumbing;
+using Autodesk.Revit.DB.Mechanical;
+using Autodesk.Revit.UI.Selection;
+using Autodesk.Revit.ApplicationServices;
+#endregion Usings
 
 namespace BuildingCoder
 {
-  /// <summary>
-  /// Based on code by Jared Wilson shared in case 14918470 [Find all ducts that have been tapped into]
-  /// https://forums.autodesk.com/t5/revit-api-forum/find-all-ducts-that-have-been-tapped-into/m-p/8485269
-  /// </summary>
-  [Transaction( TransactionMode.Manual )]
-  class CmdDuctResize : IExternalCommand
-  {
-    const BuiltInParameter bipDiameter
-      = BuiltInParameter.RBS_CURVE_DIAMETER_PARAM;
-
-    const BuiltInParameter bipHeight
-       = BuiltInParameter.RBS_CURVE_HEIGHT_PARAM;
-
-    //double twoInches = UnitUtils.Convert( 2.0,
-    //  DisplayUnitType.DUT_DECIMAL_INCHES,
-    //  DisplayUnitType.DUT_DECIMAL_FEET );
-
-    const double twoInches = 1.0 / 6.0; // two twelfths of a foot is a sixth
-
-    /// <summary>
-    /// Return shape of this duct, retrieved 
-    /// from its first or first two connectors.
-    /// </summary>
-    static ConnectorProfileType GetDuctShape( Duct d )
+    [Transaction(TransactionMode.Manual)]
+    public class CmdDuctResize : IExternalCommand
     {
-      // According to Jared, DuctType.Shape is unreliable:
+        const BuiltInParameter bipDiameter
+                = BuiltInParameter.RBS_CURVE_DIAMETER_PARAM;
 
-      //ConnectorProfileType shape = d.DuctType.Shape;
+        const BuiltInParameter bipHeight
+            = BuiltInParameter.RBS_CURVE_HEIGHT_PARAM;
 
-      Debug.Assert( null != d.ConnectorManager, 
-        "expected a valid connector manager on a duct" );
+        const double twoInches = 1.0 / 6.0; // two twelfths of a foot is a sixth
 
-      ConnectorSet cons = d.ConnectorManager.Connectors;
+        List<string> ductIds = new List<string>();
+        string idsToString;
 
-      Debug.Assert( null != cons, 
-        "expected valid connectors on a duct" );
+        /// <summary>
+        /// Return shape of this duct, retrieved
+        /// from its first or first two connectors.
+        /// </summary>
+        static ConnectorProfileType GetDuctShape(Duct d)
+        {
+            // According to Jared, DuctType.Shape is unreliable:
+            //ConnectorProfileType shape = d.DuctType.Shape;
 
-      Debug.Assert( 2 <= cons.Size, 
-        "expected at least two connectors on a duct" );
+            Debug.Assert(null != d.ConnectorManager,
+                         "expected a valid connector manager on a duct");
 
-      ConnectorProfileType shape
-        = ConnectorProfileType.Invalid;
+            ConnectorSet cons = d.ConnectorManager.Connectors;
 
-      foreach( Connector c in cons )
-      {
+            Debug.Assert(null != cons,
+                         "expected valid connectors on a duct");
+
+            Debug.Assert(2 <= cons.Size,
+                         "expected at least two connectors on a duct");
+
+            ConnectorProfileType shape
+                = ConnectorProfileType.Invalid;
+
+            foreach (Connector c in cons)
+            {
 
 #if DEBUG
-        if( ConnectorProfileType.Invalid != shape )
-        {
-          Debug.Assert( shape == c.Shape,
-              "expected same shape on first two duct connectors" );
-          break;
-        }
+                if (ConnectorProfileType.Invalid != shape)
+                {
+                    Debug.Assert(shape == c.Shape,
+                                 "expected same shape on first two duct connectors");
+                    break;
+                }
 #endif // DEBUG
 
-        shape = c.Shape;
+                shape = c.Shape;
 
-        Debug.Assert( ConnectorProfileType.Invalid != shape,
-          "expected valid shape on first two duct connectors" );
+                Debug.Assert(ConnectorProfileType.Invalid != shape,
+                             "expected valid shape on first two duct connectors");
 
 #if !DEBUG
-        break;
+				break;
 #endif // DEBUG
 
-      }
-      return shape;
-    }
-
-    /// <summary>
-    /// Return dimension for this duct:
-    /// diameter if round, else height.
-    /// </summary>
-    static double GetDuctDim( 
-      Duct d,
-      ConnectorProfileType shape )
-    {
-      return ConnectorProfileType.Round == shape
-        ? d.Diameter
-        : d.Height;
-    }
-
-    /// <summary>
-    /// Return dimension for this connector:
-    /// diameter if round, else height.
-    /// </summary>
-    static double GetConnectorDim( Connector c )
-    {
-      ConnectorProfileType shape = c.Shape;
-
-      return ConnectorProfileType.Round == shape
-        ? 2 * c.Radius
-        : c.Height;
-    }
-
-    /// <summary>
-    /// Resize ducts to ensure that branch ducts are no 
-    /// larger than the main duct they are tapping into.
-    /// </summary>
-    void DuctResize( Document doc )
-    {
-      FilteredElementCollector ductCollector
-        = new FilteredElementCollector( doc )
-          .OfClass( typeof( Duct ) );
-
-      using( Transaction transaction = new Transaction( doc ) )
-      {
-        if( transaction.Start( "Resize Ducts for Taps" )
-          == TransactionStatus.Started )
-        {
-          int i = 0;
-          foreach( Duct d in ductCollector )
-          {
-            ConnectorProfileType shape = GetDuctShape( d );
-            ConnectorSet dctCnnctrs = d.ConnectorManager.Connectors;
-
-            int nDCs = dctCnnctrs.Size;
-            if( nDCs < 3 )
-            {
-              // do nothing
             }
-            else
-            {
-              double ductDim = GetDuctDim( d, shape );
-
-              double largestConnector = 0.0;
-
-              foreach( Connector c in dctCnnctrs )
-              {
-                if( c.ConnectorType.ToString().Equals( "End" ) )
-                {
-                  // Do nothing because I am not 
-                  // interested in the "End" Connectors
-                }
-                else
-                {
-                  ConnectorSet taps = c.AllRefs;
-
-                  double maxTapDim = 0.0;
-
-                  foreach( Connector cd in taps )
-                  {
-                    double tapDim = GetConnectorDim( cd );
-
-                    if( maxTapDim < tapDim )
-                    {
-                      maxTapDim = tapDim;
-                    }
-                  }
-
-                  if( largestConnector < maxTapDim )
-                  {
-                    largestConnector = maxTapDim;
-                  }
-                }
-              }
-
-              if( largestConnector > ductDim )
-              {
-                double updatedHeight = largestConnector
-                  + twoInches;
-
-                // Use duct shape vaiable here instead of 
-                // checking parameter for null?
-
-                Parameter ductHeight 
-                  = d.get_Parameter( bipHeight )
-                  ?? d.get_Parameter( bipDiameter );
-
-                double oldHeight = ductHeight.AsDouble();
-
-                if( !Util.IsEqual( oldHeight, updatedHeight ) )
-                {
-                  ductHeight.Set( updatedHeight );
-
-                  ++i;
-                }
-              }
-            }
-          }
-
-          // Ask the end user whether the 
-          // changes are to be committed or not
-
-          TaskDialog taskDialog = new TaskDialog(
-            "Resize Ducts" );
-
-          TaskDialogCommonButtons buttons;
-
-          if( 0 < i )
-          {
-            int n = ductCollector.GetElementCount();
-
-            taskDialog.MainContent = i + " out of "
-              + n.ToString() + " ducts will be re-sized."
-              + "\n\nClick [OK] to Commit or [Cancel] "
-              + "to Roll back the transaction.";
-
-            buttons = TaskDialogCommonButtons.Ok
-              | TaskDialogCommonButtons.Cancel;
-          }
-          else
-          {
-            taskDialog.MainContent
-              = "None of the ducts need to be re-sized.";
-
-            buttons = TaskDialogCommonButtons.Ok;
-          }
-
-          taskDialog.CommonButtons = buttons;
-
-          if( TaskDialogResult.Ok == taskDialog.Show() && 0 < i )
-          {
-            // For many various reasons, a transaction may not be committed
-            // if the changes made during the transaction do not result a valid model.
-            // If committing a transaction fails or is canceled by the end user,
-            // the resulting status would be RolledBack instead of Committed.
-
-            if( TransactionStatus.Committed != transaction.Commit() )
-            {
-              TaskDialog.Show( "Failure",
-                "Transaction could not be committed" );
-            }
-          }
-
-          // No need to roll back, just do not call Commit
-
-          //else
-          //{
-          //  transaction.RollBack();
-          //}
+            return shape;
         }
-      }
-    }
 
-    public Result Execute(
+        /// <summary>
+        /// Return dimension for this duct:
+        /// diameter if round, else height.
+        /// </summary>
+        static double GetDuctDim(Duct d, ConnectorProfileType shape)
+        {
+            return ConnectorProfileType.Round == shape
+                ? d.Diameter
+                : d.Height;
+        }
+
+        /// <summary>
+        /// Return dimension for this connector:
+        /// diameter if round, else height.
+        /// </summary>
+        static double GetConnectorDim(Connector c)
+        {
+            ConnectorProfileType shape = c.Shape;
+
+            return ConnectorProfileType.Round == shape
+                ? 2.0 * c.Radius
+                : c.Height;
+        }
+
+        /// <summary>
+        /// Resize main ducts two inches larger than the largest tap into/away from it.
+        /// </summary>
+        public void DuctResize(Document doc)
+        {
+            /*
+            // Use these lines for document-level macros or external commands
+            UIApplication uiApp = commandData.Application;
+            UIDocument uiDoc = uiApp.ActiveUIDocument;
+            Document doc = uiDoc.Document;
+            */
+            string userDesktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            string textOutputFileName = "DuctsResized.txt";
+
+            FilteredElementCollector ductCollector
+                = new FilteredElementCollector(doc)
+                .OfClass(typeof(Duct));
+
+            using (Transaction transaction = new Transaction(doc))
+            {
+                if (transaction.Start("Resize Ducts for Taps")
+                   == TransactionStatus.Started)
+                {
+                    int i = 0;
+                    foreach (Duct d in ductCollector)
+                    {
+                        ConnectorProfileType shape = GetDuctShape(d);
+                        ConnectorSet dctCnnctrs = d.ConnectorManager.Connectors;
+
+                        int nDCs = dctCnnctrs.Size;
+                        if (nDCs < 3)
+                        {
+                            // do nothing
+                        }
+                        else
+                        {
+                            double ductDim = GetDuctDim(d, shape);
+                            double largestConnector = 0.0;
+
+                            foreach (Connector c in dctCnnctrs)
+                            {
+                                ConnectorProfileType ductShape = c.Shape;
+                                if (c.ConnectorType.ToString().Equals("End"))
+                                {
+                                    // Do nothing because I am not
+                                    // interested in the "End" Connectors
+                                }
+                                else
+                                {
+                                    ConnectorSet taps = c.AllRefs;
+
+                                    double maxTapDim = 0.0;
+
+                                    foreach (Connector cd in taps)
+                                    {
+                                        double tapDim = GetConnectorDim(cd);
+
+                                        if (maxTapDim < tapDim)
+                                        {
+                                            maxTapDim = tapDim;
+                                        }
+                                    }
+
+                                    if (largestConnector < maxTapDim)
+                                    {
+                                        largestConnector = maxTapDim;
+                                    }
+                                }
+                            }
+
+                            if (largestConnector >= ductDim)
+                            {
+                                double updatedHeight = largestConnector
+                                    + twoInches;
+
+                                Parameter ductHeight
+                                    = d.get_Parameter(bipHeight)
+                                    ?? d.get_Parameter(bipDiameter);
+
+                                double oldHeight = ductHeight.AsDouble();
+
+                                if (oldHeight != updatedHeight)
+                                {
+                                    ductHeight.Set(updatedHeight);
+                                    ductIds.Add(d.Id.ToString());
+                                    i++;
+                                }
+                            }
+                        }
+                    }
+
+                    // Ask the end user whether the
+                    // changes are to be committed or not
+                    TaskDialog taskDialog = new TaskDialog(
+                        "Resize Ducts");
+
+                    TaskDialogCommonButtons buttons;
+
+                    if (0 < i)
+                    {
+                        int n = ductCollector.GetElementCount();
+
+                        taskDialog.MainContent = i + " out of "
+                            + n.ToString() + " ducts will be re-sized."
+                            + "\n\nA text file ("
+                            + textOutputFileName
+                            + ") with respective duct IDs will be written to"
+                            + "\n\n" + userDesktopPath
+                            + "\n\nClick [OK] to Commit or [Cancel] "
+                            + "to Roll back the transaction.";
+
+                        buttons = TaskDialogCommonButtons.Ok
+                            | TaskDialogCommonButtons.Cancel;
+
+                        idsToString = string.Join("\r\n", ductIds);
+
+                        // Create a file to write to.
+                        userDesktopPath += "\\" + textOutputFileName;
+
+                        if (File.Exists(userDesktopPath))
+                        {
+                            File.Delete(userDesktopPath);
+                        }
+                        using (StreamWriter writer = new StreamWriter(userDesktopPath, false))
+                        {
+
+                            writer.Write("Use the following duct ids on the 'Manage' tab -> "
+                                         + "'Select by ID' to see which ducts could be resized\r\n\n");
+                            writer.Write("\r\n");
+                            writer.Write(idsToString);
+                        }
+                        ductIds.Clear();
+                    }
+                    else
+                    {
+                        taskDialog.MainContent
+                            = "None of the ducts need to be re-sized.";
+
+                        buttons = TaskDialogCommonButtons.Ok;
+                    }
+
+                    taskDialog.CommonButtons = buttons;
+
+                    if (TaskDialogResult.Ok == taskDialog.Show() && 0 < i)
+                    {
+                        // For many various reasons, a transaction may not be committed
+                        // if the changes made during the transaction do not result a valid model.
+                        // If committing a transaction fails or is canceled by the end user,
+                        // the resulting status would be RolledBack instead of Committed.
+
+                        if (TransactionStatus.Committed != transaction.Commit())
+                        {
+                            TaskDialog.Show("Failure",
+                                            "Transaction could not be committed");
+                        }
+
+                        // Create a file to write to.
+                        // userDesktopPath += "\\" + textOutputFileName;
+
+                        if (File.Exists(userDesktopPath))
+                        {
+                            File.Delete(userDesktopPath);
+                        }
+                        using (StreamWriter writer = new StreamWriter(userDesktopPath, false))
+                        {
+
+                            writer.Write("Use the following duct ids on the 'Manage' tab -> "
+                                         + "'Select by ID' to see which ducts were resized\r\n\n");
+                            writer.Write("\r\n");
+                            writer.Write(idsToString);
+                        }
+                    }
+                }
+            }
+        }
+
+        public Result Execute(
       ExternalCommandData commandData,
       ref string message,
-      ElementSet elements )
-    {
-      UIApplication uiapp = commandData.Application;
-      UIDocument uidoc = uiapp.ActiveUIDocument;
-      Document doc = uidoc.Document;
+      ElementSet elements)
+        {
+            UIApplication uiapp = commandData.Application;
+            UIDocument uidoc = uiapp.ActiveUIDocument;
+            Document doc = uidoc.Document;
 
-      DuctResize( doc );
+            DuctResize(doc);
 
-      return Result.Succeeded;
+            return Result.Succeeded;
+        }
     }
-  }
 }
